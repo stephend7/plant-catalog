@@ -615,19 +615,21 @@ $("#camInput").onchange=e=>{const f=[...e.target.files];e.target.value="";addPho
 async function saveEditor(){
   const genus=$("#fGenus").value.trim(),species=$("#fSpecies").value.trim();
   if(!genus&&!species){toast("Enter at least a genus");$("#fGenus").focus();return;}
-  const id=editing?editing.id:uid();
-  const coverId=(editCover&&editPhotos.some(p=>p.id===editCover))?editCover:(editPhotos[0]?editPhotos[0].id:null);
-  const rec={id,genus,species,name:`${genus} ${species}`.replace(/\s+/g," ").trim(),
-    sub:$("#fSub").value.trim(),price:$("#fPrice").value.trim(),notes:$("#fNotes").value.trim(),
-    coverId,createdAt:editing?editing.createdAt:Date.now(),updatedAt:Date.now()};
-  await putPlant(rec);
-  const existing=editing?(photoMap.get(id)||[]):[];
-  const keep=new Set(editPhotos.map(p=>p.id));
-  for(const old of existing)if(!keep.has(old.id))await delPhoto(old.id);
-  let order=0;for(const p of editPhotos)await putPhoto({id:p.id,plantId:id,blob:p.blob,order:order++,kind:p.kind||"both"});
-  $("#editScrim").classList.remove("show");
-  await loadAll();
-  toast(editing?"Saved":"Plant added");
+  try{
+    const id=editing?editing.id:uid();
+    const coverId=(editCover&&editPhotos.some(p=>p.id===editCover))?editCover:(editPhotos[0]?editPhotos[0].id:null);
+    const rec={id,genus,species,name:`${genus} ${species}`.replace(/\s+/g," ").trim(),
+      sub:$("#fSub").value.trim(),price:$("#fPrice").value.trim(),notes:$("#fNotes").value.trim(),
+      coverId,createdAt:editing?editing.createdAt:Date.now(),updatedAt:Date.now()};
+    await putPlant(rec);
+    const existing=editing?(photoMap.get(id)||[]):[];
+    const keep=new Set(editPhotos.map(p=>p.id));
+    for(const old of existing)if(!keep.has(old.id))await delPhoto(old.id);
+    let order=0;for(const p of editPhotos)await putPhoto({id:p.id,plantId:id,blob:p.blob,order:order++,kind:p.kind||"both"});
+    $("#editScrim").classList.remove("show");
+    await loadAll();
+    toast(editing?"Saved":"Plant added");
+  }catch(err){toast("Save failed: "+err.message);console.error(err);}
 }
 $("#saveBtn").onclick=saveEditor;
 $("#deleteBtn").onclick=async()=>{if(!editing)return;if(!confirm(`Delete “${displayName(editing)}” and its photos? This can’t be undone.`))return;await delPlant(editing.id);$("#editScrim").classList.remove("show");await loadAll();toast("Deleted");};
