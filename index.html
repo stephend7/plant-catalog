@@ -443,6 +443,9 @@ function extractEpithet(after){
   let cv=after.match(/^['‘’"“”]([^'‘’"“”]{2,40})['‘’"“”]/);
   if(cv) return (hybrid+"'"+cv[1].trim()+"'").trim();
   const genSet=new Set(genusList.map(x=>x.toLowerCase()));
+  // Skip over "sp." / "spp." and treat the following word as the epithet (e.g. "Pinguicula sp. Pachuca")
+  const spMatch=after.match(/^(spp?)\.\s+/i);
+  if(spMatch) after=after.slice(spMatch[0].length);
   const m=after.match(/^([A-Za-z][A-Za-z\-]{2,})/);
   if(!m) return hybrid.trim();
   const word=m[1].toLowerCase();
