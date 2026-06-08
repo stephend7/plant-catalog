@@ -365,8 +365,8 @@ async function delPlant(id){
   keys.forEach(k=>t.objectStore("photos").delete(k));
   return new Promise(r=>t.oncomplete=r);
 }
-async function photosFor(id){const r=await reqP(tx("photos","readonly").objectStore("photos").index("plantId").getAll(IDBKeyRange.only(id)));return r.sort((a,b)=>a.order-b.order);}
-async function putPhoto(ph){return reqP(tx("photos","readwrite").objectStore("photos").put(ph));}
+async function photosFor(id){const r=await reqP(tx("photos","readonly").objectStore("photos").index("plantId").getAll(IDBKeyRange.only(id)));return r.sort((a,b)=>a.order-b.order).map(p=>({...p,blob:p.blob instanceof Blob?p.blob:new Blob([p.blob],{type:p.blobType||"image/jpeg"})}));}
+async function putPhoto(ph){const ab=ph.blob instanceof ArrayBuffer?ph.blob:await ph.blob.arrayBuffer();return reqP(tx("photos","readwrite").objectStore("photos").put({...ph,blob:ab,blobType:ph.blob.type||"image/jpeg"}));}
 async function delPhoto(id){return reqP(tx("photos","readwrite").objectStore("photos").delete(id));}
 async function getMeta(key){try{const r=await reqP(tx("meta","readonly").objectStore("meta").get(key));return r?r.value:undefined;}catch(e){return undefined;}}
 async function setMeta(key,value){return reqP(tx("meta","readwrite").objectStore("meta").put({key,value}));}
