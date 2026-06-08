@@ -102,6 +102,7 @@
   .pthumb .kind{position:absolute;left:4px;right:4px;bottom:4px;border:none;border-radius:8px;background:rgba(20,24,17,.74);color:#f4f0e6;font-size:11px;font-weight:700;padding:4px 6px;display:flex;align-items:center;justify-content:center;gap:4px;backdrop-filter:blur(3px);z-index:2;}
   .addphoto{aspect-ratio:1/1;border-radius:10px;border:2px dashed var(--line);background:var(--paper);display:grid;place-items:center;color:var(--ink-soft);gap:2px;font-size:11px;font-weight:600;}
   .addphoto svg{width:22px;height:22px;}
+  .photolist.drag-over{outline:3px dashed var(--moss);outline-offset:4px;border-radius:12px;background:rgba(107,143,78,.07);}
   .kindchip{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;letter-spacing:.02em;}
   .kindchip.flower{background:#f4e3ee;color:#9c3a72;}
   .kindchip.plant{background:#e4efdb;color:#456b2d;}
@@ -588,6 +589,9 @@ function renderEditPhotos(){
   const a2=document.createElement("button");a2.className="addphoto";
   a2.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg><span>Camera</span>';
   a2.onclick=()=>$("#camInput").click();wrap.appendChild(a2);
+  wrap.ondragover=e=>{e.preventDefault();wrap.classList.add("drag-over");};
+  wrap.ondragleave=e=>{if(!wrap.contains(e.relatedTarget))wrap.classList.remove("drag-over");};
+  wrap.ondrop=e=>{e.preventDefault();wrap.classList.remove("drag-over");const files=[...e.dataTransfer.files].filter(f=>f.type.startsWith("image/"));if(files.length)addPhotoFiles(files);};
 }
 async function addPhotoFiles(files){
   if(!files.length)return;
