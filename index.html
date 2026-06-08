@@ -518,6 +518,13 @@ function matchGenusSpeciesFromString(raw){
     if(!m) continue;
     let after=t.slice(m.index+m[0].length).replace(/^\s+/,"");
     if(!after) return {genus:g,species:""};
+    // Cultivar in quotes — grab name, put everything after closing quote into notes
+    const cvM=after.match(/^(['''"""])(.*?)\1\s*(.*)/s);
+    if(cvM){
+      const species="'"+cvM[2].trim()+"'";
+      const notes=cvM[3].trim();
+      return {genus:g,species,notes};
+    }
     // Hybrid: standalone X or × anywhere after the genus — grab everything verbatim
     if(/\s[Xx×]\s/.test(" "+after)){
       const species=after.replace(/\s+/g," ").replace(/\s([Xx])\s/g," × ").trim();
@@ -712,6 +719,7 @@ async function addPhotoFiles(files){
   if(detected&&!$("#fGenus").value.trim()){
     $("#fGenus").value=detected.genus;
     if(detected.species&&!$("#fSpecies").value.trim())$("#fSpecies").value=detected.species;
+    if(detected.notes&&!$("#fNotes").value.trim())$("#fNotes").value=detected.notes;
     toast(`Detected ${detected.genus}${detected.species?" "+detected.species:""} — confirm or edit`);
   }
   renderEditPhotos();
