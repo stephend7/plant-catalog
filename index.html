@@ -505,20 +505,46 @@ function matchGenusSpecies(text){
     const m=new RegExp("\\b"+escapeRe(g)+"\\b","i").exec(t);
     if(!m) continue;
     const sp=extractEpithet(t.slice(m.index+m[0].length));
-    if(sp) return {genus:g,species:sp};   // prefer a genus that has an epithet/cultivar after it
+    if(sp) return {genus:g,species:sp};
     if(!fallback) fallback={genus:g,species:""};
   }
   return fallback;
 }
+function matchGenusSpeciesFromString(raw){
+  // Normalize whitespace only — preserve original case and content
+  const t=" "+raw.replace(/\s+/g," ").trim()+" ";
+  for(const g of genusList){
+    const m=new RegExp("\\b"+escapeRe(g)+"\\b","i").exec(t);
+    if(!m) continue;
+    let after=t.slice(m.index+m[0].length).replace(/^\s+/,"");
+    if(!after) return {genus:g,species:""};
+    // Hybrid: standalone X or × anywhere after the genus — grab everything verbatim
+    if(/\s[Xx×]\s/.test(" "+after)){
+      const species=after.replace(/\s+/g," ").replace(/\s([Xx])\s/g," × ").trim();
+      return {genus:g,species};
+    }
+    // Non-hybrid: use the standard word-by-word epithet extractor
+    const sp=extractEpithet(after);
+    if(sp) return {genus:g,species:sp};
+    return {genus:g,species:""};
+  }
+  return null;
+}
 async function detectFromFile(file){
-  let text=" "+(file.name||"").replace(/\.[a-z0-9]+$/i,"")+" ";
+  const candidates=[(file.name||"").replace(/\.[a-z0-9]+$/i,"")];
   try{
     if(window.exifr){
       const meta=await exifr.parse(file,{tiff:true,ifd0:true,exif:true,xmp:true,iptc:true,jfif:false,icc:false,gps:false,mergeOutput:true});
-      if(meta)text+=" "+collectStrings(meta).join("  ")+" ";
+      if(meta)candidates.push(...collectStrings(meta));
     }
-  }catch(e){/* filename only */}
-  return matchGenusSpecies(text);
+  }catch(e){}
+  // Try each string individually first — preserves full hybrid names from IPTC titles
+  for(const c of candidates){
+    const r=matchGenusSpeciesFromString(c);
+    if(r&&r.species) return r;
+  }
+  // Fall back to concatenated search (catches genus-only matches in filenames)
+  return matchGenusSpecies(candidates.join("  "));
 }
 
 /* ===================== State ===================== */
