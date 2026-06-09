@@ -571,9 +571,14 @@ async function loadAll(){
   genusList=gl;
   render();
 }
+function sortKey(p){
+  const genus=(p.genus||"").toLowerCase();
+  const species=(p.species||"").replace(/^['''"""\s]+/,"").toLowerCase();
+  return genus+"\x00"+species;
+}
 function sorted(list){
   if(sortMode==="recent")return [...list].sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
-  return [...list].sort((a,b)=>displayName(a).localeCompare(displayName(b),undefined,{sensitivity:"base"}));
+  return [...list].sort((a,b)=>sortKey(a).localeCompare(sortKey(b),undefined,{sensitivity:"base"}));
 }
 function photoMatches(ph,f){if(f==="all")return true;const k=ph.kind||"both";return k===f||k==="both";}
 function coverPhotoFor(p,f){
