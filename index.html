@@ -109,6 +109,20 @@
   .pthumb.cover{border-color:var(--moss);}
   .pthumb .cv{position:absolute;left:4px;top:4px;background:var(--moss);color:#fff;font-size:9px;font-weight:800;padding:2px 6px;border-radius:999px;letter-spacing:.04em;z-index:2;}
   .pthumb .del{position:absolute;right:3px;top:3px;width:22px;height:22px;border-radius:50%;border:none;background:rgba(20,24,17,.7);color:#fff;display:grid;place-items:center;font-size:14px;line-height:1;z-index:2;}
+  .pthumb .crop-btn{position:absolute;right:3px;bottom:28px;width:22px;height:22px;border-radius:50%;border:none;background:rgba(20,24,17,.7);color:#fff;display:grid;place-items:center;z-index:2;}
+  .pthumb .crop-btn svg{width:12px;height:12px;}
+  .crop-overlay{position:fixed;inset:0;z-index:70;background:#10130d;display:none;flex-direction:column;}
+  .crop-overlay.show{display:flex;}
+  .crop-top{display:flex;align-items:center;justify-content:space-between;padding:calc(14px + env(safe-area-inset-top)) 16px 14px;background:rgba(8,10,6,.85);flex-shrink:0;}
+  .crop-top span{color:#f4f0e6;font-size:15px;font-weight:600;}
+  .crop-stage{flex:1;min-height:0;position:relative;overflow:hidden;touch-action:none;}
+  .crop-stage img{position:absolute;max-width:100%;max-height:100%;top:50%;left:50%;transform:translate(-50%,-50%);-webkit-user-select:none;user-select:none;-webkit-user-drag:none;}
+  .crop-box{position:absolute;border:2px solid #fff;cursor:move;box-shadow:0 0 0 9999px rgba(0,0,0,.55);touch-action:none;}
+  .crop-handle{position:absolute;width:22px;height:22px;background:#fff;border-radius:3px;touch-action:none;}
+  .crop-handle[data-h="tl"]{top:-7px;left:-7px;cursor:nw-resize;}
+  .crop-handle[data-h="tr"]{top:-7px;right:-7px;cursor:ne-resize;}
+  .crop-handle[data-h="bl"]{bottom:-7px;left:-7px;cursor:sw-resize;}
+  .crop-handle[data-h="br"]{bottom:-7px;right:-7px;cursor:se-resize;}
   .pthumb .kind{position:absolute;left:4px;right:4px;bottom:4px;border:none;border-radius:8px;background:rgba(20,24,17,.74);color:#f4f0e6;font-size:11px;font-weight:700;padding:4px 6px;display:flex;align-items:center;justify-content:center;gap:4px;backdrop-filter:blur(3px);z-index:2;}
   .addphoto{aspect-ratio:1/1;border-radius:10px;border:2px dashed var(--line);background:var(--paper);display:grid;place-items:center;color:var(--ink-soft);gap:2px;font-size:11px;font-weight:600;}
   .addphoto svg{width:22px;height:22px;}
@@ -347,6 +361,24 @@
 </div>
 
 <div id="printRoot"></div>
+
+<!-- Crop overlay -->
+<div class="crop-overlay" id="cropOverlay">
+  <div class="crop-top">
+    <button class="v-close" id="cropCancel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    <span>Crop Photo</span>
+    <button class="btn primary" id="cropApply">Apply</button>
+  </div>
+  <div class="crop-stage" id="cropStage">
+    <img id="cropImg" alt="">
+    <div class="crop-box" id="cropBox">
+      <div class="crop-handle" data-h="tl"></div>
+      <div class="crop-handle" data-h="tr"></div>
+      <div class="crop-handle" data-h="bl"></div>
+      <div class="crop-handle" data-h="br"></div>
+    </div>
+  </div>
+</div>
 
 <!-- Sales List overlay -->
 <div class="sale-overlay" id="saleOverlay">
@@ -630,6 +662,85 @@ function render(){
   }
 }
 
+/* ===================== Crop ===================== */
+let cropCtx={photoIdx:null,handle:null,startX:0,startY:0,startBox:null,boxX:0,boxY:0,boxW:0,boxH:0};
+function openCrop(idx){
+  cropCtx.photoIdx=idx;
+  const ph=editPhotos[idx];
+  const img=$("#cropImg");
+  img.onload=()=>initCropBox();
+  img.src=objURL(ph.blob instanceof Blob?ph.blob:new Blob([ph.blob],{type:ph.blobType||"image/jpeg"}));
+  $("#cropOverlay").classList.add("show");
+}
+function initCropBox(){
+  const img=$("#cropImg");
+  const r=img.getBoundingClientRect();
+  const s=$("#cropStage").getBoundingClientRect();
+  setCropBox(r.left-s.left,r.top-s.top,r.width,r.height);
+}
+function setCropBox(x,y,w,h){
+  const b=$("#cropBox");
+  b.style.left=x+"px";b.style.top=y+"px";b.style.width=w+"px";b.style.height=h+"px";
+  cropCtx.boxX=x;cropCtx.boxY=y;cropCtx.boxW=w;cropCtx.boxH=h;
+}
+function cropPt(e){return e.touches?e.touches[0]:e;}
+function cropDown(e){
+  e.preventDefault();e.stopPropagation();
+  const pt=cropPt(e);
+  cropCtx.handle=e.target.dataset.h||"move";
+  cropCtx.startX=pt.clientX;cropCtx.startY=pt.clientY;
+  cropCtx.startBox={x:cropCtx.boxX,y:cropCtx.boxY,w:cropCtx.boxW,h:cropCtx.boxH};
+}
+function cropMove(e){
+  if(!cropCtx.handle)return;
+  e.preventDefault();
+  const pt=cropPt(e);
+  const dx=pt.clientX-cropCtx.startX,dy=pt.clientY-cropCtx.startY;
+  const img=$("#cropImg").getBoundingClientRect(),s=$("#cropStage").getBoundingClientRect();
+  const ix=img.left-s.left,iy=img.top-s.top,iw=img.width,ih=img.height;
+  const MIN=40;
+  let{x,y,w,h}=cropCtx.startBox;
+  if(cropCtx.handle==="move"){
+    x=Math.max(ix,Math.min(ix+iw-w,x+dx));
+    y=Math.max(iy,Math.min(iy+ih-h,y+dy));
+  } else {
+    if(cropCtx.handle.includes("r")){w=Math.max(MIN,Math.min(ix+iw-x,w+dx));}
+    if(cropCtx.handle.includes("l")){const nw=Math.max(MIN,Math.min(w+x-ix,w-dx));x=x+w-nw;w=nw;}
+    if(cropCtx.handle.includes("b")){h=Math.max(MIN,Math.min(iy+ih-y,h+dy));}
+    if(cropCtx.handle.includes("t")){const nh=Math.max(MIN,Math.min(h+y-iy,h-dy));y=y+h-nh;h=nh;}
+  }
+  setCropBox(x,y,w,h);
+}
+function cropUp(){cropCtx.handle=null;}
+async function applyCrop(){
+  const img=$("#cropImg");
+  const s=$("#cropStage").getBoundingClientRect();
+  const r=img.getBoundingClientRect();
+  const scaleX=img.naturalWidth/r.width,scaleY=img.naturalHeight/r.height;
+  const cx=(cropCtx.boxX-(r.left-s.left))*scaleX;
+  const cy=(cropCtx.boxY-(r.top-s.top))*scaleY;
+  const cw=cropCtx.boxW*scaleX,ch=cropCtx.boxH*scaleY;
+  const canvas=document.createElement("canvas");
+  canvas.width=Math.round(cw);canvas.height=Math.round(ch);
+  canvas.getContext("2d").drawImage(img,cx,cy,cw,ch,0,0,canvas.width,canvas.height);
+  const blob=await new Promise(res=>canvas.toBlob(res,"image/jpeg",0.92));
+  editPhotos[cropCtx.photoIdx].blob=blob;
+  editPhotos[cropCtx.photoIdx].blobType="image/jpeg";
+  $("#cropOverlay").classList.remove("show");
+  cropCtx.handle=null;
+  renderEditPhotos();
+  toast("Crop applied");
+}
+const cropBox=$("#cropBox");
+cropBox.addEventListener("mousedown",cropDown);
+cropBox.addEventListener("touchstart",cropDown,{passive:false});
+document.addEventListener("mousemove",e=>{if(cropCtx.handle)cropMove(e);});
+document.addEventListener("touchmove",e=>{if(cropCtx.handle)cropMove(e);},{passive:false});
+document.addEventListener("mouseup",cropUp);
+document.addEventListener("touchend",cropUp);
+$("#cropCancel").onclick=()=>{$("#cropOverlay").classList.remove("show");cropCtx.handle=null;};
+$("#cropApply").onclick=applyCrop;
+
 /* ===================== Sales List ===================== */
 async function toggleForSale(p){
   p.forSale=!p.forSale;
@@ -691,6 +802,10 @@ function renderEditPhotos(){
     const x=document.createElement("button");x.className="del";x.innerHTML="&times;";
     x.onclick=e=>{e.stopPropagation();editPhotos=editPhotos.filter(p=>p.id!==ph.id);if(editCover===ph.id)editCover=null;renderEditPhotos();};
     d.appendChild(x);
+    const cb=document.createElement("button");cb.className="crop-btn";
+    cb.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2v14h14"/><path d="M2 6h14v14"/></svg>';
+    cb.onclick=e=>{e.stopPropagation();openCrop(editPhotos.indexOf(ph));};
+    d.appendChild(cb);
     const kb=document.createElement("button");kb.className="kind";const km=KIND_META[ph.kind||"both"];
     kb.innerHTML=`<span>${km.emoji}</span><span>${km.label}</span>`;
     kb.onclick=e=>{e.stopPropagation();ph.kind=KIND_CYCLE[(KIND_CYCLE.indexOf(ph.kind||"both")+1)%3];renderEditPhotos();};
