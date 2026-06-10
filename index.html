@@ -78,6 +78,17 @@
   .sale-title{font-family:var(--serif);font-size:20px;font-weight:600;flex:1;}
   .sale-count{font-size:13px;color:var(--ink-soft);font-weight:600;}
   .sale-body{flex:1;overflow-y:auto;padding:22px 18px calc(40px + env(safe-area-inset-bottom));}
+  .login{position:fixed;inset:0;z-index:100;background:radial-gradient(1200px 600px at 80% -10%, #fbf8ee 0%, rgba(251,248,238,0) 60%),linear-gradient(180deg,var(--paper) 0%,var(--paper-2) 100%);display:none;align-items:center;justify-content:center;padding:24px;}
+  .login.show{display:flex;}
+  .login-card{background:var(--card);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow);width:100%;max-width:380px;padding:28px 26px 26px;}
+  .login-card .mark{width:46px;height:46px;border-radius:12px;margin:0 auto 14px;}
+  .login-card h2{font-family:var(--serif);font-size:23px;font-weight:600;text-align:center;margin:0 0 4px;}
+  .login-card p.sub{text-align:center;color:var(--ink-soft);font-size:13.5px;margin:0 0 18px;}
+  .login-card .field{margin-top:12px;}
+  .login-card button.primary{width:100%;justify-content:center;margin-top:18px;padding:12px;font-size:15px;}
+  .login-toggle{text-align:center;margin-top:14px;font-size:13.5px;color:var(--ink-soft);}
+  .login-toggle a{color:var(--pine-2);font-weight:700;cursor:pointer;text-decoration:underline;}
+  .login-err{color:#a23d2a;font-size:13px;text-align:center;margin-top:12px;min-height:18px;}
   .meta{padding:11px 13px 13px;}
   .name{font-family:var(--serif);font-size:16px;font-weight:600;line-height:1.2;font-style:italic;}
   .sub{font-size:12.5px;color:var(--ink-soft);margin-top:3px;line-height:1.3;font-style:italic;}
@@ -188,6 +199,23 @@
 </style>
 </head>
 <body>
+<!-- Login -->
+<div class="login" id="loginScreen">
+  <div class="login-card">
+    <div class="mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21c0-5 0-9 0-12"/><path d="M12 9c-3 0-6-2-6-5 3 0 6 2 6 5z"/><path d="M12 11c3 0 6-2 6-6-3 0-6 2-6 6z"/><path d="M12 14c-2.4 0-4.5-1.4-4.5-3.6 2.3 0 4.5 1.3 4.5 3.6z"/></svg>
+    </div>
+    <h2 id="loginTitle">Sign in</h2>
+    <p class="sub">Carnivore Catalog · synced across your devices</p>
+    <div class="field" id="loginEmailField"><label>Email</label><input id="loginEmail" type="email" autocomplete="username" autocapitalize="none" placeholder="you@example.com"></div>
+    <div class="field" id="loginPassField"><label id="loginPassLabel">Password</label><input id="loginPass" type="password" autocomplete="current-password" placeholder="••••••••"></div>
+    <button class="btn primary" id="loginBtn">Sign in</button>
+    <div class="login-err" id="loginErr"></div>
+    <div class="login-toggle" id="loginForgot" style="margin-top:10px"><a id="loginForgotLink">Forgot your password?</a></div>
+    <div class="login-toggle" id="loginToggle">New here? <a id="loginSwitch">Create an account</a></div>
+  </div>
+</div>
+
 <header>
   <div class="bar">
     <div class="brand">
@@ -313,12 +341,14 @@
       <button class="btn icon ghost" id="menuClose" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
     </div>
     <div class="sheet-body">
-      <p class="hint">Build your catalog on one device, then <b>Export</b> a single file and <b>AirDrop</b> it to your other devices, then <b>Import</b> it there.</p>
-      <div class="field"><button class="btn" id="exportBtn" style="width:100%;justify-content:center">⬇︎ Export catalog file (.json)</button></div>
-      <div class="field"><button class="btn" id="importBtn" style="width:100%;justify-content:center">⬆︎ Import catalog file…</button>
+      <p class="hint" id="syncStatus" style="margin-bottom:14px">Your catalog syncs automatically across all your devices when you're signed in.</p>
+      <div class="field"><button class="btn" id="migrateBtn" style="width:100%;justify-content:center">☁︎ Import this device's old local data</button>
+        <p class="hint" style="margin-top:6px">One-time: copies plants saved on <b>this device</b> (before sync) up to the cloud.</p></div>
+      <div class="field"><button class="btn" id="exportBtn" style="width:100%;justify-content:center">⬇︎ Export backup file (.json)</button></div>
+      <div class="field"><button class="btn" id="importBtn" style="width:100%;justify-content:center">⬆︎ Import backup file…</button>
         <input type="file" id="importInput" accept="application/json,.json" style="display:none"></div>
       <div class="field"><button class="btn" id="genusBtn" style="width:100%;justify-content:center">🌱 Edit genus list (for auto-fill)</button></div>
-      <p class="hint" style="margin-top:14px">Importing <b>adds to</b> what's here (matching names are updated). Your data also stays saved on this device automatically between visits.</p>
+      <div class="field"><button class="btn danger" id="signOutBtn" style="width:100%;justify-content:center">Sign out</button></div>
     </div>
   </div>
 </div>
@@ -405,39 +435,104 @@
 </script>
 <script>
 "use strict";
-/* ===================== Storage (IndexedDB) ===================== */
-const DB_NAME="carnivoreCatalog", DB_VER=2;
-let db=null;
-function openDB(){
+/* ===================== Storage (Supabase) ===================== */
+const SUPABASE_URL="https://zuaqxbshlyktkqgvcvew.supabase.co";
+const SUPABASE_KEY="sb_publishable_veNYuJQcjfLvh8bTiL3oxw_D8y58WxD";
+let sb=null;        // supabase client
+let userId=null;    // current logged-in user id
+
+async function initSupabase(){
+  const m=await import("https://esm.sh/@supabase/supabase-js@2");
+  sb=m.createClient(SUPABASE_URL,SUPABASE_KEY);
+}
+
+/* ---- row <-> app object mapping ---- */
+function rowToPlant(r){return {id:r.id,genus:r.genus||"",species:r.species||"",sub:r.sub||"",price:r.price||"",notes:r.notes||"",coverId:r.cover_id||null,forSale:!!r.for_sale,createdAt:Number(r.created_at)||0,updatedAt:Number(r.updated_at)||0};}
+function plantToRow(p){return {id:p.id,user_id:userId,genus:p.genus||"",species:p.species||"",sub:p.sub||"",price:p.price||"",notes:p.notes||"",cover_id:p.coverId||null,for_sale:!!p.forSale,created_at:p.createdAt||Date.now(),updated_at:p.updatedAt||Date.now()};}
+
+/* ---- plants ---- */
+async function allPlants(){
+  const {data,error}=await sb.from("plants").select("*");
+  if(error)throw error;
+  return (data||[]).map(rowToPlant);
+}
+async function putPlant(p){
+  const {error}=await sb.from("plants").upsert(plantToRow(p));
+  if(error)throw error;
+}
+async function delPlant(id){
+  const {data:phs}=await sb.from("photos").select("storage_path").eq("plant_id",id);
+  if(phs&&phs.length)await sb.storage.from("photos").remove(phs.map(x=>x.storage_path));
+  const {error}=await sb.from("plants").delete().eq("id",id); // photos rows cascade in DB
+  if(error)throw error;
+}
+
+/* ---- photos: metadata in DB, binary in Storage ---- */
+async function photosFor(id){
+  const {data,error}=await sb.from("photos").select("*").eq("plant_id",id).order("order",{ascending:true});
+  if(error)throw error;
+  const out=[];
+  for(const r of (data||[])){
+    let blob=null;
+    try{const {data:file}=await sb.storage.from("photos").download(r.storage_path);if(file)blob=file;}catch(e){console.error("photo download failed",r.storage_path,e);}
+    out.push({id:r.id,plantId:r.plant_id,order:r.order,kind:r.kind||"both",blob});
+  }
+  return out.filter(p=>p.blob);
+}
+async function putPhoto(ph){
+  const path=`${userId}/${ph.id}.jpg`;
+  const blob=ph.blob instanceof Blob?ph.blob:new Blob([ph.blob],{type:ph.blobType||"image/jpeg"});
+  const {error:upErr}=await sb.storage.from("photos").upload(path,blob,{upsert:true,contentType:blob.type||"image/jpeg"});
+  if(upErr)throw upErr;
+  const {error}=await sb.from("photos").upsert({id:ph.id,plant_id:ph.plantId,user_id:userId,order:ph.order||0,kind:ph.kind||"both",storage_path:path});
+  if(error)throw error;
+}
+async function delPhoto(id){
+  const {data:rows}=await sb.from("photos").select("storage_path").eq("id",id);
+  if(rows&&rows[0])await sb.storage.from("photos").remove([rows[0].storage_path]);
+  const {error}=await sb.from("photos").delete().eq("id",id);
+  if(error)throw error;
+}
+
+/* ---- meta (genus list) kept per-device in localStorage ---- */
+async function getMeta(key){try{const v=localStorage.getItem("meta_"+key);return v?JSON.parse(v):undefined;}catch(e){return undefined;}}
+async function setMeta(key,value){try{localStorage.setItem("meta_"+key,JSON.stringify(value));}catch(e){}}
+
+/* ---- legacy IndexedDB readers (one-time migration to Supabase) ---- */
+function idbOpen(){
   return new Promise((res,rej)=>{
-    const r=indexedDB.open(DB_NAME,DB_VER);
-    r.onupgradeneeded=e=>{
-      const d=e.target.result;
-      if(!d.objectStoreNames.contains("plants")) d.createObjectStore("plants",{keyPath:"id"});
+    const r=indexedDB.open("carnivoreCatalog",2);
+    r.onupgradeneeded=e=>{const d=e.target.result;
+      if(!d.objectStoreNames.contains("plants"))d.createObjectStore("plants",{keyPath:"id"});
       if(!d.objectStoreNames.contains("photos")){const p=d.createObjectStore("photos",{keyPath:"id"});p.createIndex("plantId","plantId",{unique:false});}
-      if(!d.objectStoreNames.contains("meta")) d.createObjectStore("meta",{keyPath:"key"});
-    };
-    r.onsuccess=e=>{db=e.target.result;res(db);};
+      if(!d.objectStoreNames.contains("meta"))d.createObjectStore("meta",{keyPath:"key"});};
+    r.onsuccess=e=>res(e.target.result);
     r.onerror=e=>rej(e.target.error);
   });
 }
-function tx(s,m){return db.transaction(s,m);}
-function reqP(req){return new Promise((res,rej)=>{req.onsuccess=()=>res(req.result);req.onerror=()=>rej(req.error);});}
-async function allPlants(){return reqP(tx("plants","readonly").objectStore("plants").getAll());}
-async function putPlant(p){return reqP(tx("plants","readwrite").objectStore("plants").put(p));}
-async function delPlant(id){
-  const t=tx(["plants","photos"],"readwrite");
-  t.objectStore("plants").delete(id);
-  const idx=t.objectStore("photos").index("plantId");
-  const keys=await reqP(idx.getAllKeys(IDBKeyRange.only(id)));
-  keys.forEach(k=>t.objectStore("photos").delete(k));
-  return new Promise(r=>t.oncomplete=r);
+function idbReq(req){return new Promise((res,rej)=>{req.onsuccess=()=>res(req.result);req.onerror=()=>rej(req.error);});}
+async function idbGetAll(){
+  let idb;try{idb=await idbOpen();}catch(e){return {plants:[],photos:[]};}
+  const plants=await idbReq(idb.transaction("plants","readonly").objectStore("plants").getAll());
+  const photos=await idbReq(idb.transaction("photos","readonly").objectStore("photos").getAll());
+  return {plants:plants||[],photos:photos||[]};
 }
-async function photosFor(id){const r=await reqP(tx("photos","readonly").objectStore("photos").index("plantId").getAll(IDBKeyRange.only(id)));return r.sort((a,b)=>a.order-b.order).map(p=>({...p,blob:p.blob instanceof Blob?p.blob:new Blob([p.blob],{type:p.blobType||"image/jpeg"})}));}
-async function putPhoto(ph){const ab=ph.blob instanceof ArrayBuffer?ph.blob:await ph.blob.arrayBuffer();return reqP(tx("photos","readwrite").objectStore("photos").put({...ph,blob:ab,blobType:ph.blob.type||"image/jpeg"}));}
-async function delPhoto(id){return reqP(tx("photos","readwrite").objectStore("photos").delete(id));}
-async function getMeta(key){try{const r=await reqP(tx("meta","readonly").objectStore("meta").get(key));return r?r.value:undefined;}catch(e){return undefined;}}
-async function setMeta(key,value){return reqP(tx("meta","readwrite").objectStore("meta").put({key,value}));}
+async function migrateFromIndexedDB(){
+  const {plants:lp,photos:lph}=await idbGetAll();
+  if(!lp.length){toast("No local data found to migrate");return;}
+  toast(`Migrating ${lp.length} plants…`);
+  for(const p of lp){
+    await putPlant({id:p.id,genus:p.genus,species:p.species,sub:p.sub,price:p.price,notes:p.notes,coverId:p.coverId,forSale:!!p.forSale,createdAt:p.createdAt,updatedAt:p.updatedAt||Date.now()});
+  }
+  let n=0;
+  for(const ph of lph){
+    const blob=ph.blob instanceof Blob?ph.blob:new Blob([ph.blob],{type:ph.blobType||"image/jpeg"});
+    await putPhoto({id:ph.id,plantId:ph.plantId,order:ph.order,kind:ph.kind,blob});
+    n++;
+  }
+  await loadAll();
+  toast(`Migrated ${lp.length} plants and ${n} photos ✓`);
+}
 
 /* ===================== Helpers ===================== */
 const $=s=>document.querySelector(s);
@@ -1010,7 +1105,107 @@ $("#filterSeg").addEventListener("click",e=>{const b=e.target.closest("button");
 $("#sortSeg").addEventListener("click",e=>{const b=e.target.closest("button");if(!b)return;sortMode=b.dataset.sort;[...$("#sortSeg").children].forEach(x=>x.classList.toggle("on",x===b));render();});
 [...document.querySelectorAll(".scrim")].forEach(s=>s.addEventListener("click",e=>{if(e.target===s)s.classList.remove("show");}));
 
-(async function init(){try{await openDB();await loadAll();}catch(err){toast("Storage unavailable here — use the downloaded file in Safari");console.error(err);}})();
+/* ===================== Auth ===================== */
+let loginMode="signin"; // signin | signup | reset | newpass
+function showLogin(){$("#loginScreen").classList.add("show");}
+function hideLogin(){$("#loginScreen").classList.remove("show");}
+function setLoginMode(mode){
+  loginMode=mode;
+  const titles={signin:"Sign in",signup:"Create account",reset:"Reset password",newpass:"Set a new password"};
+  const btns={signin:"Sign in",signup:"Create account",reset:"Send reset link",newpass:"Update password"};
+  $("#loginTitle").textContent=titles[mode];
+  $("#loginBtn").textContent=btns[mode];
+  // field visibility per mode
+  $("#loginEmailField").style.display=(mode==="newpass")?"none":"";
+  $("#loginPassField").style.display=(mode==="reset")?"none":"";
+  $("#loginPassLabel").textContent=(mode==="newpass")?"New password":"Password";
+  $("#loginPass").setAttribute("autocomplete",(mode==="signin")?"current-password":"new-password");
+  // forgot link only on sign-in
+  $("#loginForgot").style.display=(mode==="signin")?"":"none";
+  // bottom toggle text
+  if(mode==="signup") $("#loginToggle").innerHTML='Already have an account? <a id="loginSwitch">Sign in</a>';
+  else if(mode==="reset") $("#loginToggle").innerHTML='<a id="loginSwitch">Back to sign in</a>';
+  else if(mode==="newpass") $("#loginToggle").innerHTML='';
+  else $("#loginToggle").innerHTML='New here? <a id="loginSwitch">Create an account</a>';
+  const sw=$("#loginSwitch");
+  if(sw) sw.onclick=()=>setLoginMode((mode==="signin")?"signup":"signin");
+  $("#loginErr").textContent="";
+}
+async function doLogin(){
+  const email=$("#loginEmail").value.trim(), pass=$("#loginPass").value;
+  $("#loginBtn").disabled=true;$("#loginErr").textContent="";
+  try{
+    if(loginMode==="reset"){
+      if(!email){$("#loginErr").textContent="Enter your email.";return;}
+      const {error}=await sb.auth.resetPasswordForEmail(email,{redirectTo:location.origin+location.pathname});
+      if(error){$("#loginErr").textContent=error.message;return;}
+      $("#loginErr").style.color="var(--pine-2)";
+      $("#loginErr").textContent="Check your email for a reset link.";
+      setTimeout(()=>{$("#loginErr").style.color="";},6000);
+      return;
+    }
+    if(loginMode==="newpass"){
+      if(!pass||pass.length<6){$("#loginErr").textContent="Password must be at least 6 characters.";return;}
+      const {error}=await sb.auth.updateUser({password:pass});
+      if(error){$("#loginErr").textContent=error.message;return;}
+      toast("Password updated ✓");
+      $("#loginPass").value="";
+      // recovery session is active — load the app
+      const {data}=await sb.auth.getSession();
+      if(data.session) await onSignedIn(data.session);
+      return;
+    }
+    if(!email||!pass){$("#loginErr").textContent="Enter your email and password.";return;}
+    let res;
+    if(loginMode==="signup") res=await sb.auth.signUp({email,password:pass});
+    else res=await sb.auth.signInWithPassword({email,password:pass});
+    if(res.error){$("#loginErr").textContent=res.error.message;return;}
+    if(loginMode==="signup"&&!res.data.session){
+      $("#loginErr").textContent="Account created — check your email to confirm, then sign in.";
+      setLoginMode("signin");return;
+    }
+    // session established — onAuthStateChange will load the app
+  }catch(err){$("#loginErr").textContent=err.message||"Something went wrong.";}
+  finally{$("#loginBtn").disabled=false;}
+}
+$("#loginBtn").onclick=doLogin;
+$("#loginPass").addEventListener("keydown",e=>{if(e.key==="Enter")doLogin();});
+$("#loginEmail").addEventListener("keydown",e=>{if(e.key==="Enter")doLogin();});
+$("#loginForgotLink").onclick=()=>setLoginMode("reset");
+$("#signOutBtn").onclick=async()=>{await sb.auth.signOut();location.reload();};
+$("#migrateBtn").onclick=async()=>{
+  if(!confirm("Import plants stored on THIS device (from before sync) into your cloud catalog?"))return;
+  $("#menuScrim").classList.remove("show");
+  try{await migrateFromIndexedDB();}catch(err){toast("Migration failed: "+err.message);console.error(err);}
+};
+
+let loadedUser=null;
+async function onSignedIn(session){
+  userId=session.user.id;
+  hideLogin();
+  if(loadedUser===userId)return; // avoid duplicate load from listener + getSession
+  loadedUser=userId;
+  try{await loadAll();}catch(err){toast("Couldn't load catalog: "+err.message);console.error(err);}
+}
+
+(async function init(){
+  try{
+    await initSupabase();
+    setLoginMode("signin");
+    sb.auth.onAuthStateChange((event,session)=>{
+      if(event==="PASSWORD_RECOVERY"){showLogin();setLoginMode("newpass");return;}
+      if(session&&session.user){onSignedIn(session);}
+      else{userId=null;showLogin();}
+    });
+    const {data}=await sb.auth.getSession();
+    if(data.session&&data.session.user) await onSignedIn(data.session);
+    else showLogin();
+  }catch(err){
+    console.error(err);
+    showLogin();
+    $("#loginErr").textContent="Couldn't reach the sync server. Check your connection.";
+  }
+})();
 </script>
 </body>
 </html>
