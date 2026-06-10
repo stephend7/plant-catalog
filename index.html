@@ -207,10 +207,11 @@
     </div>
     <h2 id="loginTitle">Sign in</h2>
     <p class="sub">Carnivore Catalog · synced across your devices</p>
-    <div class="field"><label>Email</label><input id="loginEmail" type="email" autocomplete="username" autocapitalize="none" placeholder="you@example.com"></div>
-    <div class="field"><label>Password</label><input id="loginPass" type="password" autocomplete="current-password" placeholder="••••••••"></div>
+    <div class="field" id="loginEmailField"><label>Email</label><input id="loginEmail" type="email" autocomplete="username" autocapitalize="none" placeholder="you@example.com"></div>
+    <div class="field" id="loginPassField"><label id="loginPassLabel">Password</label><input id="loginPass" type="password" autocomplete="current-password" placeholder="••••••••"></div>
     <button class="btn primary" id="loginBtn">Sign in</button>
     <div class="login-err" id="loginErr"></div>
+    <div class="login-toggle" id="loginForgot" style="margin-top:10px"><a id="loginForgotLink">Forgot your password?</a></div>
     <div class="login-toggle" id="loginToggle">New here? <a id="loginSwitch">Create an account</a></div>
   </div>
 </div>
@@ -1105,24 +1106,56 @@ $("#sortSeg").addEventListener("click",e=>{const b=e.target.closest("button");if
 [...document.querySelectorAll(".scrim")].forEach(s=>s.addEventListener("click",e=>{if(e.target===s)s.classList.remove("show");}));
 
 /* ===================== Auth ===================== */
-let loginMode="signin"; // or "signup"
+let loginMode="signin"; // signin | signup | reset | newpass
 function showLogin(){$("#loginScreen").classList.add("show");}
 function hideLogin(){$("#loginScreen").classList.remove("show");}
 function setLoginMode(mode){
   loginMode=mode;
-  const signup=mode==="signup";
-  $("#loginTitle").textContent=signup?"Create account":"Sign in";
-  $("#loginBtn").textContent=signup?"Create account":"Sign in";
-  $("#loginPass").setAttribute("autocomplete",signup?"new-password":"current-password");
-  $("#loginToggle").innerHTML=signup?'Already have an account? <a id="loginSwitch">Sign in</a>':'New here? <a id="loginSwitch">Create an account</a>';
-  $("#loginSwitch").onclick=()=>setLoginMode(signup?"signin":"signup");
+  const titles={signin:"Sign in",signup:"Create account",reset:"Reset password",newpass:"Set a new password"};
+  const btns={signin:"Sign in",signup:"Create account",reset:"Send reset link",newpass:"Update password"};
+  $("#loginTitle").textContent=titles[mode];
+  $("#loginBtn").textContent=btns[mode];
+  // field visibility per mode
+  $("#loginEmailField").style.display=(mode==="newpass")?"none":"";
+  $("#loginPassField").style.display=(mode==="reset")?"none":"";
+  $("#loginPassLabel").textContent=(mode==="newpass")?"New password":"Password";
+  $("#loginPass").setAttribute("autocomplete",(mode==="signin")?"current-password":"new-password");
+  // forgot link only on sign-in
+  $("#loginForgot").style.display=(mode==="signin")?"":"none";
+  // bottom toggle text
+  if(mode==="signup") $("#loginToggle").innerHTML='Already have an account? <a id="loginSwitch">Sign in</a>';
+  else if(mode==="reset") $("#loginToggle").innerHTML='<a id="loginSwitch">Back to sign in</a>';
+  else if(mode==="newpass") $("#loginToggle").innerHTML='';
+  else $("#loginToggle").innerHTML='New here? <a id="loginSwitch">Create an account</a>';
+  const sw=$("#loginSwitch");
+  if(sw) sw.onclick=()=>setLoginMode((mode==="signin")?"signup":"signin");
   $("#loginErr").textContent="";
 }
 async function doLogin(){
   const email=$("#loginEmail").value.trim(), pass=$("#loginPass").value;
-  if(!email||!pass){$("#loginErr").textContent="Enter your email and password.";return;}
   $("#loginBtn").disabled=true;$("#loginErr").textContent="";
   try{
+    if(loginMode==="reset"){
+      if(!email){$("#loginErr").textContent="Enter your email.";return;}
+      const {error}=await sb.auth.resetPasswordForEmail(email,{redirectTo:location.origin+location.pathname});
+      if(error){$("#loginErr").textContent=error.message;return;}
+      $("#loginErr").style.color="var(--pine-2)";
+      $("#loginErr").textContent="Check your email for a reset link.";
+      setTimeout(()=>{$("#loginErr").style.color="";},6000);
+      return;
+    }
+    if(loginMode==="newpass"){
+      if(!pass||pass.length<6){$("#loginErr").textContent="Password must be at least 6 characters.";return;}
+      const {error}=await sb.auth.updateUser({password:pass});
+      if(error){$("#loginErr").textContent=error.message;return;}
+      toast("Password updated ✓");
+      $("#loginPass").value="";
+      // recovery session is active — load the app
+      const {data}=await sb.auth.getSession();
+      if(data.session) await onSignedIn(data.session);
+      return;
+    }
+    if(!email||!pass){$("#loginErr").textContent="Enter your email and password.";return;}
     let res;
     if(loginMode==="signup") res=await sb.auth.signUp({email,password:pass});
     else res=await sb.auth.signInWithPassword({email,password:pass});
@@ -1132,12 +1165,13 @@ async function doLogin(){
       setLoginMode("signin");return;
     }
     // session established — onAuthStateChange will load the app
-  }catch(err){$("#loginErr").textContent=err.message||"Sign-in failed.";}
+  }catch(err){$("#loginErr").textContent=err.message||"Something went wrong.";}
   finally{$("#loginBtn").disabled=false;}
 }
 $("#loginBtn").onclick=doLogin;
 $("#loginPass").addEventListener("keydown",e=>{if(e.key==="Enter")doLogin();});
-$("#loginSwitch").onclick=()=>setLoginMode(loginMode==="signup"?"signin":"signup");
+$("#loginEmail").addEventListener("keydown",e=>{if(e.key==="Enter")doLogin();});
+$("#loginForgotLink").onclick=()=>setLoginMode("reset");
 $("#signOutBtn").onclick=async()=>{await sb.auth.signOut();location.reload();};
 $("#migrateBtn").onclick=async()=>{
   if(!confirm("Import plants stored on THIS device (from before sync) into your cloud catalog?"))return;
@@ -1159,6 +1193,7 @@ async function onSignedIn(session){
     await initSupabase();
     setLoginMode("signin");
     sb.auth.onAuthStateChange((event,session)=>{
+      if(event==="PASSWORD_RECOVERY"){showLogin();setLoginMode("newpass");return;}
       if(session&&session.user){onSignedIn(session);}
       else{userId=null;showLogin();}
     });
