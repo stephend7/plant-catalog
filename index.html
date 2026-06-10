@@ -474,10 +474,15 @@ async function photosFor(id){
   const out=[];
   for(const r of (data||[])){
     let blob=null;
-    try{const {data:file}=await sb.storage.from("photos").download(r.storage_path);if(file)blob=file;}catch(e){console.error("photo download failed",r.storage_path,e);}
-    out.push({id:r.id,plantId:r.plant_id,order:r.order,kind:r.kind||"both",blob});
+    const cached=await photoCacheGet(r.id);
+    if(cached){blob=cached.blob;}
+    else{
+      try{const {data:file}=await sb.storage.from("photos").download(r.storage_path);if(file){blob=file;photoCachePut(r.id,{id:r.id,plantId:r.plant_id,order:r.order,kind:r.kind||"both",blob}).catch(()=>{});}}
+      catch(e){console.error("photo download failed",r.storage_path,e);}
+    }
+    if(blob)out.push({id:r.id,plantId:r.plant_id,order:r.order,kind:r.kind||"both",blob});
   }
-  return out.filter(p=>p.blob);
+  return out;
 }
 async function putPhoto(ph){
   const path=`${userId}/${ph.id}.jpg`;
@@ -486,12 +491,38 @@ async function putPhoto(ph){
   if(upErr)throw upErr;
   const {error}=await sb.from("photos").upsert({id:ph.id,plant_id:ph.plantId,user_id:userId,order:ph.order||0,kind:ph.kind||"both",storage_path:path});
   if(error)throw error;
+  // Keep local cache in sync so this photo is available offline immediately
+  photoCachePut(ph.id,{id:ph.id,plantId:ph.plantId,order:ph.order||0,kind:ph.kind||"both",blob}).catch(()=>{});
 }
 async function delPhoto(id){
   const {data:rows}=await sb.from("photos").select("storage_path").eq("id",id);
   if(rows&&rows[0])await sb.storage.from("photos").remove([rows[0].storage_path]);
   const {error}=await sb.from("photos").delete().eq("id",id);
   if(error)throw error;
+  photoCacheDel(id).catch(()=>{});
+}
+
+/* ---- local photo cache (IndexedDB) ---- */
+let _pcDB=null;
+function pcOpen(){
+  if(_pcDB)return Promise.resolve(_pcDB);
+  return new Promise((res,rej)=>{
+    const r=indexedDB.open("photoCache",1);
+    r.onupgradeneeded=e=>{const s=e.target.result.createObjectStore("blobs",{keyPath:"id"});s.createIndex("plantId","plantId",{unique:false});};
+    r.onsuccess=e=>{_pcDB=e.target.result;res(_pcDB);};
+    r.onerror=e=>rej(e.target.error);
+  });
+}
+function pcReq(req){return new Promise((res,rej)=>{req.onsuccess=()=>res(req.result);req.onerror=()=>rej(req.error);});}
+async function photoCacheGet(id){try{const db=await pcOpen();return await pcReq(db.transaction("blobs","readonly").objectStore("blobs").get(id));}catch(e){return null;}}
+async function photoCachePut(id,data){try{const db=await pcOpen();await pcReq(db.transaction("blobs","readwrite").objectStore("blobs").put(data));}catch(e){console.warn("photoCachePut",e);}}
+async function photoCacheDel(id){try{const db=await pcOpen();await pcReq(db.transaction("blobs","readwrite").objectStore("blobs").delete(id));}catch(e){}}
+async function photosForOffline(plantId){
+  try{
+    const db=await pcOpen();
+    const items=await pcReq(db.transaction("blobs","readonly").objectStore("blobs").index("plantId").getAll(plantId));
+    return (items||[]).filter(p=>p.blob).sort((a,b)=>a.order-b.order);
+  }catch(e){return [];}
 }
 
 /* ---- meta (genus list) kept per-device in localStorage ---- */
@@ -690,13 +721,26 @@ let viewer={list:[],i:0};
 
 /* ===================== Load + render ===================== */
 async function loadAll(){
-  plants=await allPlants();
-  photoMap.clear();
-  for(const p of plants)photoMap.set(p.id,await photosFor(p.id));
+  let usedCache=false;
+  try{
+    plants=await allPlants();
+    // Persist plant list for offline use (keyed by user so multi-user devices work)
+    try{localStorage.setItem("offline_plants_"+userId,JSON.stringify(plants));}catch(e){}
+    photoMap.clear();
+    for(const p of plants)photoMap.set(p.id,await photosFor(p.id));
+  }catch(err){
+    // Network unavailable — fall back to last-synced local data
+    const raw=localStorage.getItem("offline_plants_"+userId);
+    if(raw){try{plants=JSON.parse(raw);usedCache=true;}catch(e){plants=[];}}
+    else plants=[];
+    photoMap.clear();
+    for(const p of plants)photoMap.set(p.id,await photosForOffline(p.id));
+  }
   let gl=await getMeta("genusList");
   if(!gl||!gl.length){gl=DEFAULT_GENERA.slice();await setMeta("genusList",gl);}
   genusList=gl;
   render();
+  if(usedCache)toast("Offline — showing last synced data");
 }
 function sortKey(p){
   const genus=(p.genus||"").toLowerCase();
@@ -1189,6 +1233,8 @@ async function onSignedIn(session){
 }
 
 (async function init(){
+  // Register service worker for offline app shell + CDN caching
+  if("serviceWorker" in navigator){navigator.serviceWorker.register("/plant-catalog/sw.js").catch(()=>{});}
   try{
     await initSupabase();
     setLoginMode("signin");
