@@ -196,6 +196,17 @@
     .print-card .pl .pn{font-weight:600;font-style:italic;}
     .print-card .pl .ps{font-style:italic;color:#555;font-size:.82em;margin-top:0.03in;}
     .print-card .pl .pp{font-weight:700;margin-top:0.04in;font-style:normal;}
+    /* Show list: 2-inch laminate tags */
+    .tag-grid{display:flex;flex-wrap:wrap;gap:0.22in;align-items:flex-start;justify-content:flex-start;}
+    .tag-card{width:2in;break-inside:avoid;border:1px dashed #aaa;background:#fff;}
+    .tag-card img{width:2in;height:auto;display:block;}
+    .tag-card .tag-name{font-family:var(--serif);font-style:italic;font-weight:600;font-size:10pt;line-height:1.18;text-align:center;color:#1c2017;padding:0.06in 0.05in 0.08in;word-wrap:break-word;}
+    /* Show list: compact catalog sheet */
+    .sheet-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:0.14in 0.16in;}
+    .sheet-card{break-inside:avoid;text-align:center;}
+    .sheet-card img{width:100%;aspect-ratio:1/1;object-fit:cover;display:block;background:#eee;}
+    .sheet-card .tag-name{font-family:var(--serif);font-style:italic;font-weight:600;font-size:8pt;line-height:1.15;color:#1c2017;margin-top:0.03in;word-wrap:break-word;}
+    .sheet-title{font-family:var(--serif);font-size:13pt;font-weight:600;color:#1c2017;margin:0 0 0.14in;}
   }
 </style>
 </head>
@@ -253,6 +264,10 @@
 <main>
   <div class="toolbar" id="toolbar" style="display:none;">
     <span class="count" id="count"></span>
+    <button class="btn" id="showPrintBtn" style="display:none">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9V3h12v6"/><rect x="6" y="13" width="12" height="8"/><path d="M6 17H4a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2h-2"/></svg>
+      Print
+    </button>
     <span style="margin-left:auto"></span>
     <div class="seg" id="filterSeg">
       <button data-filter="all" class="on">All</button>
@@ -430,6 +445,21 @@
     </div>
   </div>
 </div>
+<!-- Show list print menu -->
+<div class="scrim" id="showPrintScrim">
+  <div class="sheet" role="dialog" aria-modal="true" style="max-width:420px">
+    <div class="sheet-head"><h3>Print show list</h3>
+      <button class="btn icon ghost" id="showPrintClose" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
+    <div class="sheet-body" style="padding-bottom:22px">
+      <div class="field"><button class="btn" id="printTagsBtn" style="width:100%;justify-content:center">🏷️ Plant tags — 2 in. wide</button>
+        <p class="hint" style="margin-top:6px">One tag per plant, full photo with name underneath. Cut along the dashed lines and laminate.</p></div>
+      <div class="field"><button class="btn" id="printSheetBtn" style="width:100%;justify-content:center">📄 Catalog sheet — 1–2 pages</button>
+        <p class="hint" style="margin-top:6px">All show plants in a compact grid with names, organized by genus.</p></div>
+    </div>
+  </div>
+</div>
+
 <!-- Confirm dialog (duplicate warnings, etc.) -->
 <div class="scrim" id="confirmScrim" style="z-index:80">
   <div class="sheet" role="dialog" aria-modal="true" style="max-width:400px">
@@ -787,6 +817,7 @@ function render(){
   saleBtn.classList.toggle("on",showMode);
   if(saleLbl)saleLbl.textContent=showCount>0?`Show (${showCount})`:"Show Mode";
   saleBtn.title=showMode?`Exit Show Mode (${showCount} plants)`:`Enter Show Mode — ${showCount} plant${showCount===1?"":"s"} selected`;
+  $("#showPrintBtn").style.display=(showMode&&showCount>0)?"":"none";
 
   const grid=$("#grid"),empty=$("#empty"),tb=$("#toolbar");
   grid.innerHTML="";
@@ -1130,6 +1161,39 @@ async function doPrint(){
   setTimeout(()=>window.print(),120);
 }
 $("#doPrint").onclick=doPrint;
+
+/* ---- Show list printing (tags + catalog sheet) ---- */
+// "P. moranensis" — abbreviated genus, FULL species/hybrid/cultivar name intact
+function abbrevName(p){
+  const g=(p.genus||"").trim(),s=(p.species||"").trim();
+  const ab=g?g[0].toUpperCase()+".":"";
+  return (ab+" "+s).replace(/\s+/g," ").trim()||displayName(p);
+}
+async function printShowList(format){
+  // Always genus-then-species order regardless of current sort toggle
+  const list=plants.filter(p=>p.forSale).sort((a,b)=>sortKey(a).localeCompare(sortKey(b),undefined,{sensitivity:"base"}));
+  if(!list.length){toast("No plants in your show list yet");return;}
+  $("#showPrintScrim").classList.remove("show");
+  toast("Preparing print…");
+  const items=[];
+  for(const p of list){
+    const ph=coverPhotoFor(p,"all");
+    items.push({name:abbrevName(p),data:ph?await blobToDataURL(ph.blob):null});
+  }
+  const root=$("#printRoot");
+  if(format==="tags"){
+    root.innerHTML=`<div class="tag-grid">${items.map(it=>
+      `<div class="tag-card">${it.data?`<img src="${it.data}">`:""}<div class="tag-name">${escapeHTML(it.name)}</div></div>`).join("")}</div>`;
+  }else{
+    root.innerHTML=`<div><div class="sheet-title">Show List — ${new Date().toLocaleDateString()}</div><div class="sheet-grid">${items.map(it=>
+      `<div class="sheet-card">${it.data?`<img src="${it.data}">`:""}<div class="tag-name">${escapeHTML(it.name)}</div></div>`).join("")}</div></div>`;
+  }
+  setTimeout(()=>window.print(),150);
+}
+$("#showPrintBtn").onclick=()=>$("#showPrintScrim").classList.add("show");
+$("#showPrintClose").onclick=()=>$("#showPrintScrim").classList.remove("show");
+$("#printTagsBtn").onclick=()=>printShowList("tags");
+$("#printSheetBtn").onclick=()=>printShowList("sheet");
 
 /* ===================== Export / Import ===================== */
 async function exportCatalog(){
