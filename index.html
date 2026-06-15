@@ -96,6 +96,8 @@
 
   .empty{text-align:center;padding:70px 20px;color:var(--ink-soft);}
   .empty .ill{width:84px;height:84px;margin:0 auto 18px;color:var(--moss);opacity:.8;}
+  .empty .ill.spin{animation:spin 1s linear infinite;}
+  @keyframes spin{to{transform:rotate(360deg);}}
   .empty h2{font-family:var(--serif);color:var(--ink);font-size:24px;margin:0 0 8px;font-weight:600;}
   .empty p{max-width:380px;margin:0 auto 20px;line-height:1.55;font-size:15px;}
   .empty .row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;}
@@ -280,7 +282,14 @@
     </div>
   </div>
   <div class="grid" id="grid"></div>
-  <div class="empty" id="empty">
+  <div class="empty" id="loadingState" style="display:none">
+    <div class="ill spin">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.6"/></svg>
+    </div>
+    <h2>Loading your catalog…</h2>
+    <p>Fetching your plants and photos. This is quick after the first time.</p>
+  </div>
+  <div class="empty" id="empty" style="display:none">
     <div class="ill">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c0-7 0-13 0-17"/><path d="M12 9C7.5 9 3.5 6 3.5 1.5 9 1.5 12 4.5 12 9z"/><path d="M12 12c4.5 0 8.5-3 8.5-8.5C15 3.5 12 6.5 12 12z"/></svg>
     </div>
@@ -503,48 +512,72 @@ async function putPlant(p){
   if(error)throw error;
 }
 async function delPlant(id){
-  const {data:phs}=await sb.from("photos").select("storage_path").eq("plant_id",id);
-  if(phs&&phs.length)await sb.storage.from("photos").remove(phs.map(x=>x.storage_path));
+  const {data:phs}=await sb.from("photos").select("id,storage_path").eq("plant_id",id);
+  if(phs&&phs.length){
+    const paths=[];phs.forEach(x=>{paths.push(x.storage_path);paths.push(thumbPath(x.id));});
+    await sb.storage.from("photos").remove(paths);
+    for(const x of phs)photoCacheDel(x.id).catch(()=>{});
+  }
   const {error}=await sb.from("plants").delete().eq("id",id); // photos rows cascade in DB
   if(error)throw error;
 }
 
-/* ---- photos: metadata in DB, binary in Storage ---- */
-async function photosFor(id){
-  const {data,error}=await sb.from("photos").select("*").eq("plant_id",id).order("order",{ascending:true});
+/* ---- photos: metadata in DB, full + thumbnail in Storage ---- */
+const THUMB_EDGE=420, THUMB_Q=0.72;
+function fullPath(id){return `${userId}/${id}.jpg`;}
+function thumbPath(id){return `${userId}/${id}_thumb.jpg`;}
+async function makeThumb(blob){try{return await resizeImage(blob,THUMB_EDGE,THUMB_Q);}catch(e){return null;}}
+// One query for ALL of the user's photo metadata (no per-plant round-trips)
+async function allPhotoMeta(){
+  const {data,error}=await sb.from("photos").select("*").order("order",{ascending:true});
   if(error)throw error;
-  const out=[];
-  for(const r of (data||[])){
-    let blob=null;
-    const cached=await photoCacheGet(r.id);
-    if(cached){blob=cached.blob;}
-    else{
-      try{const {data:file}=await sb.storage.from("photos").download(r.storage_path);if(file){blob=file;photoCachePut(r.id,{id:r.id,plantId:r.plant_id,order:r.order,kind:r.kind||"both",blob}).catch(()=>{});}}
-      catch(e){console.error("photo download failed",r.storage_path,e);}
-    }
-    if(blob)out.push({id:r.id,plantId:r.plant_id,order:r.order,kind:r.kind||"both",blob});
-  }
-  return out;
+  return data||[];
+}
+async function downloadBlob(path){
+  try{const {data:file}=await sb.storage.from("photos").download(path);return file||null;}
+  catch(e){return null;}
 }
 async function putPhoto(ph){
-  const path=`${userId}/${ph.id}.jpg`;
   const blob=ph.blob instanceof Blob?ph.blob:new Blob([ph.blob],{type:ph.blobType||"image/jpeg"});
-  const {error:upErr}=await sb.storage.from("photos").upload(path,blob,{upsert:true,contentType:blob.type||"image/jpeg"});
+  const thumb=await makeThumb(blob)||blob;
+  const {error:upErr}=await sb.storage.from("photos").upload(fullPath(ph.id),blob,{upsert:true,contentType:"image/jpeg"});
   if(upErr)throw upErr;
-  const {error}=await sb.from("photos").upsert({id:ph.id,plant_id:ph.plantId,user_id:userId,order:ph.order||0,kind:ph.kind||"both",storage_path:path});
+  await sb.storage.from("photos").upload(thumbPath(ph.id),thumb,{upsert:true,contentType:"image/jpeg"}).catch(()=>{});
+  const {error}=await sb.from("photos").upsert({id:ph.id,plant_id:ph.plantId,user_id:userId,order:ph.order||0,kind:ph.kind||"both",storage_path:fullPath(ph.id)});
   if(error)throw error;
-  // Keep local cache in sync so this photo is available offline immediately
-  photoCachePut(ph.id,{id:ph.id,plantId:ph.plantId,order:ph.order||0,kind:ph.kind||"both",blob}).catch(()=>{});
+  photoCachePut(ph.id,{id:ph.id,plantId:ph.plantId,order:ph.order||0,kind:ph.kind||"both",blob,thumb}).catch(()=>{});
+}
+// Metadata-only update (order/kind) for an existing photo whose image hasn't changed
+async function updatePhotoMeta(ph){
+  const {error}=await sb.from("photos").upsert({id:ph.id,plant_id:ph.plantId,user_id:userId,order:ph.order||0,kind:ph.kind||"both",storage_path:fullPath(ph.id)});
+  if(error)throw error;
+  const rec=await photoCacheGet(ph.id);
+  if(rec){rec.order=ph.order||0;rec.kind=ph.kind||"both";rec.plantId=ph.plantId;await photoCachePut(ph.id,rec).catch(()=>{});}
 }
 async function delPhoto(id){
   const {data:rows}=await sb.from("photos").select("storage_path").eq("id",id);
-  if(rows&&rows[0])await sb.storage.from("photos").remove([rows[0].storage_path]);
+  const paths=[];if(rows&&rows[0])paths.push(rows[0].storage_path);paths.push(thumbPath(id));
+  await sb.storage.from("photos").remove(paths).catch(()=>{});
   const {error}=await sb.from("photos").delete().eq("id",id);
   if(error)throw error;
   photoCacheDel(id).catch(()=>{});
 }
+// Make sure a photo's FULL-size blob is available (cache → cloud). Used by viewer/crop/print/export.
+async function ensureFull(ph){
+  if(ph.blob)return ph.blob;
+  const rec=await photoCacheGet(ph.id);
+  if(rec&&rec.blob){ph.blob=rec.blob;ph._furl=null;return ph.blob;}
+  if(sb&&userId){
+    const full=await downloadBlob(fullPath(ph.id));
+    if(full){ph.blob=full;ph._furl=null;
+      const base=rec||{id:ph.id,plantId:ph.plantId,order:ph.order,kind:ph.kind||"both",thumb:null};
+      base.blob=full;photoCachePut(ph.id,base).catch(()=>{});
+      return full;}
+  }
+  return null;
+}
 
-/* ---- local photo cache (IndexedDB) ---- */
+/* ---- local photo cache (IndexedDB) — records hold {id,plantId,order,kind,thumb,blob} ---- */
 let _pcDB=null;
 function pcOpen(){
   if(_pcDB)return Promise.resolve(_pcDB);
@@ -563,7 +596,7 @@ async function photosForOffline(plantId){
   try{
     const db=await pcOpen();
     const items=await pcReq(db.transaction("blobs","readonly").objectStore("blobs").index("plantId").getAll(plantId));
-    return (items||[]).filter(p=>p.blob).sort((a,b)=>a.order-b.order);
+    return (items||[]).filter(p=>p.thumb||p.blob).sort((a,b)=>a.order-b.order);
   }catch(e){return [];}
 }
 
@@ -611,6 +644,12 @@ async function migrateFromIndexedDB(){
 const $=s=>document.querySelector(s);
 const uid=()=>(crypto.randomUUID?crypto.randomUUID():Date.now()+"-"+Math.random().toString(16).slice(2));
 function objURL(b){return URL.createObjectURL(b);}
+// Object-URL lifecycle: memoize one URL per photo record, revoke them all on reload (prevents leak)
+let _urls=new Set();
+function trackURL(u){_urls.add(u);return u;}
+function revokeAllURLs(){for(const u of _urls){try{URL.revokeObjectURL(u);}catch(e){}}_urls.clear();}
+function thumbURL(ph){if(!ph)return null;if(ph._turl)return ph._turl;const b=ph.thumb||ph.blob;if(!b)return null;return ph._turl=trackURL(URL.createObjectURL(b));}
+function fullURL(ph){if(!ph)return null;if(ph._furl)return ph._furl;if(!ph.blob)return null;return ph._furl=trackURL(URL.createObjectURL(ph.blob));}
 function toast(m){const t=$("#toast");t.textContent=m;t.classList.add("show");clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove("show"),2600);}
 function escapeHTML(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));}
 function escapeRe(s){return s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");}
@@ -763,27 +802,93 @@ let editing=null, editPhotos=[], editCover=null;
 let viewer={list:[],i:0};
 
 /* ===================== Load + render ===================== */
-async function loadAll(){
-  let usedCache=false;
-  try{
-    plants=await allPlants();
-    // Persist plant list for offline use (keyed by user so multi-user devices work)
-    try{localStorage.setItem("offline_plants_"+userId,JSON.stringify(plants));}catch(e){}
-    photoMap.clear();
-    for(const p of plants)photoMap.set(p.id,await photosFor(p.id));
-  }catch(err){
-    // Network unavailable — fall back to last-synced local data
-    const raw=localStorage.getItem("offline_plants_"+userId);
-    if(raw){try{plants=JSON.parse(raw);usedCache=true;}catch(e){plants=[];}}
-    else plants=[];
-    photoMap.clear();
-    for(const p of plants)photoMap.set(p.id,await photosForOffline(p.id));
-  }
+function showLoadingState(){$("#loadingState").style.display="";$("#empty").style.display="none";$("#toolbar").style.display="none";$("#grid").innerHTML="";}
+function hideLoadingState(){$("#loadingState").style.display="none";}
+async function ensureGenusList(){
   let gl=await getMeta("genusList");
   if(!gl||!gl.length){gl=DEFAULT_GENERA.slice();await setMeta("genusList",gl);}
   genusList=gl;
+}
+// Load plant list + thumbnails from the device (instant, fully offline)
+async function loadFromLocal(){
+  const raw=localStorage.getItem("offline_plants_"+userId);
+  if(!raw)return false;
+  try{plants=JSON.parse(raw);}catch(e){return false;}
+  photoMap.clear();
+  for(const p of plants)photoMap.set(p.id,await photosForOffline(p.id));
+  return true;
+}
+function liveRec(id){for(const arr of photoMap.values()){const f=arr.find(x=>x.id===id);if(f)return f;}return null;}
+function attachToPhotoMap(rec){
+  const live=liveRec(rec.id);if(!live)return;
+  if(rec.thumb&&!live.thumb){live.thumb=rec.thumb;live._turl=null;}
+  if(rec.blob&&!live.blob){live.blob=rec.blob;live._furl=null;}
+}
+
+async function loadAll(){
+  revokeAllURLs();
+  await ensureGenusList();
+  // PHASE 1 — instant paint from the device (no network)
+  const haveLocal=await loadFromLocal();
+  if(haveLocal){render();}else{showLoadingState();}
+  // PHASE 2 — sync structure from the cloud (plant list + all photo metadata in 2 queries)
+  let meta=null;
+  try{
+    plants=await allPlants();
+    try{localStorage.setItem("offline_plants_"+userId,JSON.stringify(plants));}catch(e){}
+    meta=await allPhotoMeta();
+    const byPlant=new Map();
+    for(const r of meta){if(!byPlant.has(r.plant_id))byPlant.set(r.plant_id,[]);byPlant.get(r.plant_id).push(r);}
+    photoMap.clear();
+    for(const p of plants){
+      const rows=(byPlant.get(p.id)||[]).sort((a,b)=>(a.order||0)-(b.order||0));
+      const arr=[];
+      for(const r of rows){
+        let rec=await photoCacheGet(r.id);
+        if(!rec)rec={id:r.id,plantId:r.plant_id,order:r.order,kind:r.kind||"both",thumb:null,blob:null};
+        rec.order=r.order;rec.kind=r.kind||"both";rec.plantId=r.plant_id;
+        arr.push(rec);
+      }
+      photoMap.set(p.id,arr);
+    }
+    render();
+    hideLoadingState();
+    // PHASE 3 — fill the device cache in the background (thumbs first, then full images)
+    backgroundCacheSync(meta);
+  }catch(err){
+    // Offline (or sync failed): keep whatever we painted from local
+    hideLoadingState();
+    if(!haveLocal){plants=[];photoMap.clear();render();}
+    else toast("Offline — showing your saved catalog");
+    console.warn("cloud sync skipped:",err&&err.message);
+  }
+}
+// Download missing thumbnails (fast), then missing full images (for complete offline) — non-blocking.
+let _bgSyncToken=0;
+async function backgroundCacheSync(meta){
+  const token=++_bgSyncToken;
+  let painted=0;
+  // 1) thumbnails — makes the grid sharp quickly
+  for(const r of meta){
+    if(token!==_bgSyncToken)return; // a newer load superseded us
+    let rec=await photoCacheGet(r.id)||{id:r.id,plantId:r.plant_id,order:r.order,kind:r.kind||"both",thumb:null,blob:null};
+    if(rec.thumb)continue;
+    let thumb=await downloadBlob(thumbPath(r.id));
+    if(!thumb){ // older photo with no thumbnail yet — derive one from the full image, then store it
+      const full=rec.blob||await downloadBlob(r.storage_path);
+      if(full){rec.blob=full;thumb=await makeThumb(full);
+        if(thumb)sb.storage.from("photos").upload(thumbPath(r.id),thumb,{upsert:true,contentType:"image/jpeg"}).catch(()=>{});}
+    }
+    if(thumb){rec.thumb=thumb;await photoCachePut(r.id,rec);attachToPhotoMap(rec);
+      if(++painted%6===0)render();}
+  }
   render();
-  if(usedCache)toast("Offline — showing last synced data");
+  // 2) full-size images — so every plant is fully viewable offline
+  for(const r of meta){
+    if(token!==_bgSyncToken)return;
+    let rec=await photoCacheGet(r.id);
+    if(rec&&!rec.blob){const full=await downloadBlob(r.storage_path);if(full){rec.blob=full;await photoCachePut(r.id,rec);attachToPhotoMap(rec);}}
+  }
 }
 function sortKey(p){
   const genus=(p.genus||"").toLowerCase();
@@ -820,6 +925,7 @@ function render(){
   $("#showPrintBtn").style.display=(showMode&&showCount>0)?"":"none";
 
   const grid=$("#grid"),empty=$("#empty"),tb=$("#toolbar");
+  $("#loadingState").style.display="none";
   grid.innerHTML="";
   if(plants.length===0){empty.style.display="";tb.style.display="none";return;}
   empty.style.display="none";tb.style.display="flex";
@@ -831,7 +937,8 @@ function render(){
     const cover=coverPhotoFor(p,viewFilter);
     const card=document.createElement("button");card.className="card";card.onclick=()=>openViewerForPlant(p.id);
     const thumb=document.createElement("div");thumb.className="thumb";
-    if(cover){const im=document.createElement("img");im.loading="lazy";im.src=objURL(cover.blob);thumb.appendChild(im);}
+    const cu=cover&&thumbURL(cover);
+    if(cu){const im=document.createElement("img");im.loading="lazy";im.src=cu;thumb.appendChild(im);}
     else thumb.innerHTML='<div class="ph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="9" r="1.6"/><path d="m4 17 5-5 4 4 3-3 4 4"/></svg></div>';
     if(photos.length>1){const b=document.createElement("span");b.className="badge";b.textContent=photos.length+" photos";thumb.appendChild(b);}
     if(p.price){const pr=document.createElement("span");pr.className="price";pr.textContent=p.price;thumb.appendChild(pr);}
@@ -855,12 +962,14 @@ function render(){
 
 /* ===================== Crop ===================== */
 let cropCtx={photoIdx:null,handle:null,startX:0,startY:0,startBox:null,boxX:0,boxY:0,boxW:0,boxH:0};
-function openCrop(idx){
+async function openCrop(idx){
   cropCtx.photoIdx=idx;
   const ph=editPhotos[idx];
+  const blob=await ensureFull(ph); // cropping needs the full-size image
+  if(!blob){toast("Couldn’t load the full image to crop (offline?)");return;}
   const img=$("#cropImg");
   img.onload=()=>initCropBox();
-  img.src=objURL(ph.blob instanceof Blob?ph.blob:new Blob([ph.blob],{type:ph.blobType||"image/jpeg"}));
+  img.src=objURL(blob);
   $("#cropOverlay").classList.add("show");
 }
 function initCropBox(){
@@ -915,8 +1024,8 @@ async function applyCrop(){
   canvas.width=Math.round(cw);canvas.height=Math.round(ch);
   canvas.getContext("2d").drawImage(img,cx,cy,cw,ch,0,0,canvas.width,canvas.height);
   const blob=await new Promise(res=>canvas.toBlob(res,"image/jpeg",0.92));
-  editPhotos[cropCtx.photoIdx].blob=blob;
-  editPhotos[cropCtx.photoIdx].blobType="image/jpeg";
+  const ep=editPhotos[cropCtx.photoIdx];
+  ep.blob=blob;ep.blobType="image/jpeg";ep.thumb=null;ep._turl=null;ep._furl=null;ep.changed=true; // re-upload image + thumb on save
   $("#cropOverlay").classList.remove("show");
   cropCtx.handle=null;
   renderEditPhotos();
@@ -950,7 +1059,8 @@ function renderSaleList(){
     const cover=coverPhotoFor(p,"all");
     const card=document.createElement("button");card.className="card";card.onclick=()=>openViewerForPlant(p.id);
     const thumb=document.createElement("div");thumb.className="thumb";
-    if(cover){const im=document.createElement("img");im.loading="lazy";im.src=objURL(cover.blob);thumb.appendChild(im);}
+    const cu=cover&&thumbURL(cover);
+    if(cu){const im=document.createElement("img");im.loading="lazy";im.src=cu;thumb.appendChild(im);}
     else thumb.innerHTML='<div class="ph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="9" r="1.6"/><path d="m4 17 5-5 4 4 3-3 4 4"/></svg></div>';
     if(photos.length>1){const b=document.createElement("span");b.className="badge";b.textContent=photos.length+" photos";thumb.appendChild(b);}
     card.appendChild(thumb);
@@ -993,7 +1103,7 @@ function renderEditPhotos(){
   const coverId=(editCover&&editPhotos.some(p=>p.id===editCover))?editCover:editPhotos[0]&&editPhotos[0].id;
   editPhotos.forEach(ph=>{
     const d=document.createElement("div");d.className="pthumb"+(coverId===ph.id?" cover":"");
-    const im=document.createElement("img");im.src=objURL(ph.blob);d.appendChild(im);
+    const im=document.createElement("img");im.src=thumbURL(ph)||fullURL(ph)||"";d.appendChild(im);
     d.onclick=()=>{editCover=ph.id;renderEditPhotos();};
     if(coverId===ph.id){const c=document.createElement("span");c.className="cv";c.textContent="CATALOG";d.appendChild(c);}
     const x=document.createElement("button");x.className="del";x.innerHTML="&times;";
@@ -1027,7 +1137,7 @@ async function addPhotoFiles(files){
     try{
       if(!detected&&!$("#fGenus").value.trim()) detected=await detectFromFile(f);
       const blob=await fileToResizedBlob(f);
-      editPhotos.push({id:uid(),blob,order:order++,kind:"both"});
+      editPhotos.push({id:uid(),blob,order:order++,kind:"both",isNew:true});
     }catch(err){
       console.error(err);
       toast(isHeic(f)?"Couldn’t read that HEIC here — open the app in Safari, or export the photo as JPEG":"Couldn’t add a photo");
@@ -1087,7 +1197,13 @@ async function saveEditor(){
     const existing=editing?(photoMap.get(id)||[]):[];
     const keep=new Set(editPhotos.map(p=>p.id));
     for(const old of existing)if(!keep.has(old.id))await delPhoto(old.id);
-    let order=0;for(const p of editPhotos)await putPhoto({id:p.id,plantId:id,blob:p.blob,order:order++,kind:p.kind||"both"});
+    // Only upload images that are new or were cropped; for the rest just update order/kind
+    let order=0;
+    for(const p of editPhotos){
+      const ord=order++;
+      if(p.isNew||p.changed){await putPhoto({id:p.id,plantId:id,blob:p.blob,order:ord,kind:p.kind||"both"});}
+      else{await updatePhotoMeta({id:p.id,plantId:id,order:ord,kind:p.kind||"both"});}
+    }
     $("#editScrim").classList.remove("show");
     await loadAll();
     toast(editing?"Saved":"Plant added");
@@ -1100,17 +1216,21 @@ $("#deleteBtn").onclick=async()=>{if(!editing)return;if(!confirm(`Delete “${di
 function buildViewerList(plantList,onlyCovers){
   const list=[];
   for(const p of plantList){
-    if(onlyCovers){const c=coverPhotoFor(p,viewFilter);if(c)list.push({url:objURL(c.blob),name:displayName(p),sub:p.sub||"",kind:c.kind||"both",plantId:p.id,photoId:c.id});}
-    else{for(const ph of (photoMap.get(p.id)||[]))list.push({url:objURL(ph.blob),name:displayName(p),sub:p.sub||"",kind:ph.kind||"both",plantId:p.id,photoId:ph.id});}
+    if(onlyCovers){const c=coverPhotoFor(p,viewFilter);if(c)list.push({photo:c,name:displayName(p),sub:p.sub||"",kind:c.kind||"both",plantId:p.id,photoId:c.id});}
+    else{for(const ph of (photoMap.get(p.id)||[]))list.push({photo:ph,name:displayName(p),sub:p.sub||"",kind:ph.kind||"both",plantId:p.id,photoId:ph.id});}
   }
   return list;
 }
 function openViewer(list,i){if(!list.length){toast("No photos here yet");return;}viewer={list,i:i||0};$("#viewer").classList.add("show");showViewer();}
 function openViewerForPlant(id){const p=plants.find(x=>x.id===id);if(!p)return;const photos=photoMap.get(id)||[];if(!photos.length){openEditor(p);return;}openViewer(buildViewerList([p],false),0);}
 function startSlideshowAll(){openViewer(buildViewerList(sorted(filtered()),true),0);}
-function showViewer(){
+async function showViewer(){
   const{list,i}=viewer,cur=list[i];
-  $("#vImg").src=cur.url;$("#vName").textContent=cur.name;$("#vSub").textContent=cur.sub;
+  // Show the thumbnail instantly, then swap in the full-size image (cache → cloud)
+  const ph=cur.photo;
+  $("#vImg").src=fullURL(ph)||thumbURL(ph)||"";
+  if(!ph.blob){ensureFull(ph).then(b=>{if(b&&viewer.list[viewer.i]&&viewer.list[viewer.i].photo===ph)$("#vImg").src=fullURL(ph);});}
+  $("#vName").textContent=cur.name;$("#vSub").textContent=cur.sub;
   const km=KIND_META[cur.kind||"both"];$("#vKind").innerHTML=`<span class="kindchip ${cur.kind||"both"}">${km.emoji} ${km.label}</span>`;
   $("#vCounter").textContent=`${i+1} / ${list.length}`;
   $("#vPrev").disabled=i<=0;$("#vNext").disabled=i>=list.length-1;
@@ -1137,7 +1257,7 @@ function openPrintForPlant(plantId,photoId){
   const photos=photoMap.get(plantId)||[];if(!photos.length){toast("Add a photo first");return;}
   printCtx={plantId,photoId:photoId||(photos.find(x=>x.id===p.coverId)||photos[0]).id,size:printCtx.size||"4x6"};
   const pp=$("#printPhotos");pp.innerHTML="";
-  photos.forEach(ph=>{const d=document.createElement("div");d.className="pthumb"+(ph.id===printCtx.photoId?" cover":"");const im=document.createElement("img");im.src=objURL(ph.blob);d.appendChild(im);d.onclick=()=>{printCtx.photoId=ph.id;openPrintForPlant(plantId,ph.id);};pp.appendChild(d);});
+  photos.forEach(ph=>{const d=document.createElement("div");d.className="pthumb"+(ph.id===printCtx.photoId?" cover":"");const im=document.createElement("img");im.src=thumbURL(ph)||fullURL(ph)||"";d.appendChild(im);d.onclick=()=>{printCtx.photoId=ph.id;openPrintForPlant(plantId,ph.id);};pp.appendChild(d);});
   const so=$("#sizeOpts");so.innerHTML="";
   SIZES.forEach(s=>{const b=document.createElement("button");b.className=s.id===printCtx.size?"on":"";b.innerHTML=`<div class="sn">${s.name}</div><div class="sd">${s.desc}</div>`;b.onclick=()=>{printCtx.size=s.id;openPrintForPlant(plantId,printCtx.photoId);};so.appendChild(b);});
   $("#optSub").parentElement.style.display=p.sub?"":"none";
@@ -1147,7 +1267,8 @@ function openPrintForPlant(plantId,photoId){
 async function doPrint(){
   const p=plants.find(x=>x.id===printCtx.plantId);if(!p)return;
   const photos=photoMap.get(p.id)||[];const ph=photos.find(x=>x.id===printCtx.photoId)||photos[0];
-  const size=SIZES.find(s=>s.id===printCtx.size);const dataURL=await blobToDataURL(ph.blob);
+  const size=SIZES.find(s=>s.id===printCtx.size);
+  const fb=await ensureFull(ph)||ph.thumb;const dataURL=fb?await blobToDataURL(fb):"";
   const showName=$("#optName").checked,showSub=$("#optSub").checked&&p.sub,showPrice=$("#optPrice").checked&&p.price,tile=$("#optTile").checked;
   const label=`<div class="pl">${showName?`<div class="pn" style="font-size:${Math.max(11,size.w*4.5)}pt">${escapeHTML(displayName(p))}</div>`:""}${showSub?`<div class="ps">${escapeHTML(p.sub)}</div>`:""}${showPrice?`<div class="pp">${escapeHTML(p.price)}</div>`:""}</div>`;
   const card=`<div class="print-card"><img src="${dataURL}" style="width:${size.w}in;height:${size.h}in">${label}</div>`;
@@ -1178,7 +1299,8 @@ async function printShowList(format){
   const items=[];
   for(const p of list){
     const ph=coverPhotoFor(p,"all");
-    items.push({name:abbrevName(p),data:ph?await blobToDataURL(ph.blob):null});
+    let data=null;if(ph){const fb=await ensureFull(ph)||ph.thumb;if(fb)data=await blobToDataURL(fb);}
+    items.push({name:abbrevName(p),data});
   }
   const root=$("#printRoot");
   if(format==="tags"){
@@ -1200,7 +1322,7 @@ async function exportCatalog(){
   toast("Preparing export…");
   const out={app:"CarnivoreCatalog",version:2,exportedAt:new Date().toISOString(),genusList,plants:[]};
   for(const p of plants){
-    const photoData=[];for(const ph of (photoMap.get(p.id)||[]))photoData.push({id:ph.id,order:ph.order,kind:ph.kind||"both",data:await blobToDataURL(ph.blob)});
+    const photoData=[];for(const ph of (photoMap.get(p.id)||[])){const fb=await ensureFull(ph)||ph.thumb;if(fb)photoData.push({id:ph.id,order:ph.order,kind:ph.kind||"both",data:await blobToDataURL(fb)});}
     out.plants.push({id:p.id,genus:p.genus||"",species:p.species||"",name:p.name||displayName(p),sub:p.sub||"",price:p.price||"",notes:p.notes||"",coverId:p.coverId||null,createdAt:p.createdAt||Date.now(),photos:photoData});
   }
   const blob=new Blob([JSON.stringify(out)],{type:"application/json"});
